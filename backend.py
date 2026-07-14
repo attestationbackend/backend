@@ -33,7 +33,7 @@ def add_username(hwid, username):
         PLAYERS[hwid].setdefault('usernames', []).append(username)
 
 # ============================================
-# HTML ADMIN DASHBOARD (with file upload)
+# HTML ADMIN DASHBOARD (with file name display)
 # ============================================
 DASHBOARD_HTML = """
 <!DOCTYPE html>
@@ -65,11 +65,11 @@ DASHBOARD_HTML = """
         .settings-input { width: 80px; padding: 3px; background: #222; color: #fff; border: 1px solid #555; }
         .settings-btn { padding: 3px 8px; background: #3498db; color: white; border: none; border-radius: 3px; cursor: pointer; }
         .settings-btn:hover { background: #2980b9; }
-        .file-upload { display: inline-block; }
+        .file-upload { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; }
         .file-upload input[type="file"] { display: none; }
         .file-upload label { background: #9b59b6; color: white; padding: 4px 10px; border-radius: 3px; cursor: pointer; }
         .file-upload label:hover { background: #8e44ad; }
-        .status-msg { margin-left: 10px; font-size: 12px; }
+        .file-name { color: #0f0; font-size: 12px; max-width: 150px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
         .timestamp { color: #888; font-size: 0.8em; }
         .log-hwid { font-family: monospace; }
         .username-list { font-weight: bold; color: #0f0; }
@@ -81,9 +81,18 @@ DASHBOARD_HTML = """
                 alert('HWID copied: ' + hwid);
             });
         }
+        function updateFileName(hwid) {
+            const input = document.getElementById('fileInput_' + hwid);
+            const label = document.getElementById('fileName_' + hwid);
+            if (input.files && input.files.length > 0) {
+                label.textContent = input.files[0].name;
+            } else {
+                label.textContent = 'No file chosen';
+            }
+        }
         function uploadFile(hwid) {
-            const fileInput = document.getElementById('fileInput_' + hwid);
-            const file = fileInput.files[0];
+            const input = document.getElementById('fileInput_' + hwid);
+            const file = input.files[0];
             if (!file) {
                 alert('Please select a file first.');
                 return;
@@ -101,7 +110,9 @@ DASHBOARD_HTML = """
                 .then(data => {
                     if (data.status === 'ok') {
                         alert('File sent successfully!');
-                        fileInput.value = '';
+                        // Reset file input and label
+                        input.value = '';
+                        document.getElementById('fileName_' + hwid).textContent = 'No file chosen';
                     } else {
                         alert('Error: ' + data.error);
                     }
@@ -137,8 +148,9 @@ DASHBOARD_HTML = """
             </td>
             <td>
                 <div class="file-upload">
-                    <input type="file" id="fileInput_{{ hwid }}">
+                    <input type="file" id="fileInput_{{ hwid }}" onchange="updateFileName('{{ hwid }}')">
                     <label for="fileInput_{{ hwid }}">Choose file</label>
+                    <span class="file-name" id="fileName_{{ hwid }}">No file chosen</span>
                     <button class="btn btn-file" onclick="uploadFile('{{ hwid }}')">Send</button>
                 </div>
             </td>
