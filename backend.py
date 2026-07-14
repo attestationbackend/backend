@@ -1,10 +1,18 @@
-from flask import Flask, request, jsonify, render_template_string
+from flask import Flask, request, jsonify, render_template_string, after_this_request
 import json
 import os
 import base64
 from datetime import datetime, timedelta
 
 app = Flask(__name__)
+
+# ===== CORS support =====
+@app.after_request
+def after_request(response):
+    response.headers.add('Access-Control-Allow-Origin', '*')
+    response.headers.add('Access-Control-Allow-Headers', 'Content-Type')
+    response.headers.add('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE')
+    return response
 
 # ===== Persistent storage =====
 DATA_FILE = "players_data.json"
@@ -22,18 +30,17 @@ def save_data(data):
     with open(DATA_FILE, "w") as f:
         json.dump(data, f, indent=4)
 
-PLAYERS = load_data()   # hwid -> { 'first_seen', 'last_seen', 'status', 'settings_override', 'usernames': [] }
-PENDING_FILES = {}      # hwid -> {'filename': name, 'content_b64': base64string}
+PLAYERS = load_data()
+PENDING_FILES = {}
 
 ADMIN_PASSWORD = "admin123"  # CHANGE THIS!
 
-# ===== Helper: unique usernames per HWID =====
 def add_username(hwid, username):
     if username and username not in PLAYERS[hwid].get('usernames', []):
         PLAYERS[hwid].setdefault('usernames', []).append(username)
 
 # ============================================
-# HTML ADMIN DASHBOARD (with file name display)
+# HTML ADMIN DASHBOARD
 # ============================================
 DASHBOARD_HTML = """
 <!DOCTYPE html>
@@ -70,10 +77,12 @@ DASHBOARD_HTML = """
         .file-upload label { background: #9b59b6; color: white; padding: 4px 10px; border-radius: 3px; cursor: pointer; }
         .file-upload label:hover { background: #8e44ad; }
         .file-name { color: #0f0; font-size: 12px; max-width: 150px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .status-msg { font-size: 12px; padding: 2px 6px; border-radius: 3px; }
+        .status-msg.success { color: #0f0; background: #0a2a0a; }
+        .status-msg.error { color: #f00; background: #2a0a0a; }
+        .status-msg.info { color: #ff0; background: #2a2a0a; }
         .timestamp { color: #888; font-size: 0.8em; }
-        .log-hwid { font-family: monospace; }
         .username-list { font-weight: bold; color: #0f0; }
-        .copy-tooltip { font-size: 12px; color: #aaa; }
     </style>
     <script>
         function copyHWID(hwid) {
@@ -89,17 +98,32 @@ DASHBOARD_HTML = """
             } else {
                 label.textContent = 'No file chosen';
             }
+            document.getElementById('statusMsg_' + hwid).textContent = '';
+        }
+        function setStatus(hwid, msg, type) {
+            const el = document.getElementById('statusMsg_' + hwid);
+            el.textContent = msg;
+            el.className = 'status-msg ' + type;
+            if (type === 'success' || type === 'error') {
+                setTimeout(() => { 
+                    if (el.textContent === msg) { // only clear if not overwritten
+                        el.textContent = '';
+                        el.className = 'status-msg';
+                    }
+                }, 5000);
+            }
         }
         function uploadFile(hwid) {
             const input = document.getElementById('fileInput_' + hwid);
             const file = input.files[0];
             if (!file) {
-                alert('Please select a file first.');
+                setStatus(hwid, 'No file selected', 'error');
                 return;
             }
+            setStatus(hwid, 'Uploading...', 'info');
             const reader = new FileReader();
             reader.onload = function(e) {
-                const content = e.target.result; // data URL
+                const content = e.target.result;
                 const base64Content = content.split(',')[1];
                 fetch('/admin/upload_file', {
                     method: 'POST',
@@ -109,15 +133,21 @@ DASHBOARD_HTML = """
                 .then(res => res.json())
                 .then(data => {
                     if (data.status === 'ok') {
-                        alert('File sent successfully!');
-                        // Reset file input and label
+                        setStatus(hwid, '✔ Sent!', 'success');
                         input.value = '';
                         document.getElementById('fileName_' + hwid).textContent = 'No file chosen';
                     } else {
-                        alert('Error: ' + data.error);
+                        setStatus(hwid, '✘ ' + data.error, 'error');
                     }
                 })
-                .catch(err => alert('Network error: ' + err));
+                .catch(err => {
+                    setStatus(hwid, '✘ Network error', 'error');
+                    console.error(err);
+                });
+            };
+            reader.onerror = function(err) {
+                setStatus(hwid, '✘ File read error', 'error');
+                console.error(err);
             };
             reader.readAsDataURL(file);
         }
@@ -152,6 +182,7 @@ DASHBOARD_HTML = """
                     <label for="fileInput_{{ hwid }}">Choose file</label>
                     <span class="file-name" id="fileName_{{ hwid }}">No file chosen</span>
                     <button class="btn btn-file" onclick="uploadFile('{{ hwid }}')">Send</button>
+                    <span class="status-msg" id="statusMsg_{{ hwid }}"></span>
                 </div>
             </td>
             <td>
@@ -247,17 +278,13 @@ def admin_panel():
         return "Unauthorized", 401
 
     now = datetime.now()
-    # Active players (last 20 seconds)
     active = {}
     for hwid, data in PLAYERS.items():
         last = datetime.fromisoformat(data['last_seen'])
         if (now - last).total_seconds() <= 20:
             active[hwid] = data
 
-    # All players (for history)
     all_players = PLAYERS.copy()
-
-    # Build users table (by username)
     users = {}
     for hwid, data in PLAYERS.items():
         for uname in data.get('usernames', []):
@@ -269,7 +296,6 @@ def admin_panel():
                 }
             if hwid not in users[uname]['hwids']:
                 users[uname]['hwids'].append(hwid)
-            # Update first/last seen based on this HWID
             if data['first_seen'] < users[uname]['first_seen']:
                 users[uname]['first_seen'] = data['first_seen']
             if data['last_seen'] > users[uname]['last_seen']:
@@ -314,7 +340,8 @@ def register():
     # Check for pending file
     if hwid in PENDING_FILES:
         response['file_payload'] = PENDING_FILES[hwid]
-        del PENDING_FILES[hwid]   # one-time delivery
+        del PENDING_FILES[hwid]
+        print(f"[+] Delivered file to {hwid}")
 
     if status == 'kicked':
         PLAYERS[hwid]['status'] = 'active'
@@ -332,6 +359,7 @@ def ban_player():
     if hwid in PLAYERS:
         PLAYERS[hwid]['status'] = 'banned'
         save_data(PLAYERS)
+        print(f"[+] Banned {hwid}")
     return '', 204
 
 @app.route('/admin/unban', methods=['POST'])
@@ -340,6 +368,7 @@ def unban_player():
     if hwid in PLAYERS:
         PLAYERS[hwid]['status'] = 'active'
         save_data(PLAYERS)
+        print(f"[+] Unbanned {hwid}")
     return '', 204
 
 @app.route('/admin/kick', methods=['POST'])
@@ -348,6 +377,7 @@ def kick_player():
     if hwid in PLAYERS:
         PLAYERS[hwid]['status'] = 'kicked'
         save_data(PLAYERS)
+        print(f"[+] Kicked {hwid}")
     return '', 204
 
 @app.route('/admin/settings', methods=['POST'])
@@ -364,6 +394,7 @@ def set_settings():
             value = int(value)
         PLAYERS[hwid]['settings_override'] = {'setting': setting, 'value': value}
         save_data(PLAYERS)
+        print(f"[+] Settings for {hwid}: {setting}={value}")
     return '', 204
 
 @app.route('/admin/upload_file', methods=['POST'])
@@ -373,12 +404,14 @@ def upload_file():
     filename = data.get('filename')
     content_b64 = data.get('content_b64')
     if not hwid or not filename or not content_b64:
+        print(f"[!] Upload missing fields: hwid={hwid}, filename={filename}, has_content={bool(content_b64)}")
         return jsonify({'status': 'error', 'error': 'Missing fields'}), 400
     if hwid not in PLAYERS:
+        print(f"[!] Unknown HWID: {hwid}")
         return jsonify({'status': 'error', 'error': 'HWID not found'}), 404
     PENDING_FILES[hwid] = {'filename': filename, 'content_b64': content_b64}
-    print(f"[+] File queued for {hwid}: {filename}")
+    print(f"[+] File queued for {hwid}: {filename} ({len(content_b64)} chars)")
     return jsonify({'status': 'ok'}), 200
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000, debug=False)
+    app.run(host='0.0.0.0', port=5000, debug=True)
