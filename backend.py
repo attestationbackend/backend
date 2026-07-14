@@ -200,7 +200,7 @@ DASHBOARD_HTML = """
                     alert('Startup setting changed. Will take effect on next heartbeat.');
                 } else {
                     alert('Error: ' + data.error);
-                    checkbox.checked = !checked; // revert
+                    checkbox.checked = !checked;
                 }
             })
             .catch(err => { alert('Network error'); checkbox.checked = !checked; });
@@ -533,7 +533,6 @@ def request_screenshot():
         return jsonify({'status': 'error', 'error': 'Missing HWID'}), 400
     if hwid not in PLAYERS:
         return jsonify({'status': 'error', 'error': 'HWID not found'}), 404
-    # If a screenshot already exists, remove it so user can request a new one
     if hwid in screenshot_files:
         del screenshot_files[hwid]
     screenshot_requests[hwid] = True
